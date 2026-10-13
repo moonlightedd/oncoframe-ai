@@ -96,7 +96,8 @@ export default function Evaluation() {
                       const ci = data.bootstrapCis?.[r.modelName]?.[metric];
                       return (
                         <td key={r.modelName} className="py-2 px-3 text-right font-mono text-xs">
-                          {ci ? `${ci.mean.toFixed(4)} [{ci.lower95.toFixed(4)}, ${ci.upper95.toFixed(4)}]` : '—'}
+
+                         {ci ? <>{ci.mean.toFixed(4)} [{ci.lower95.toFixed(4)}, {ci.upper95.toFixed(4)}]</> : '—'}
                         </td>
                       );
                     })}
