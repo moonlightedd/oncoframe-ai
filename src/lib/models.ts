@@ -1,3 +1,4 @@
+
 import type { CandidateRow } from './types';
 
 export interface Standardizer {
@@ -5,50 +6,113 @@ export interface Standardizer {
   std: number[];
 }
 
-export function fitStandardizer(rows: CandidateRow[], featureNames: string[]): Standardizer {
+export function fitStandardizer(
+  rows: CandidateRow[],
+  featureNames: string[]
+): Standardizer {
   const n = rows.length;
-  if (n === 0) return { mean: [], std: [] };
+
+  if (n === 0) {
+    return {
+      mean: new Array(featureNames.length).fill(0),
+      std: new Array(featureNames.length).fill(1),
+    };
+  }
+
   const mean = new Array(featureNames.length).fill(0);
+
   for (const row of rows) {
     for (let i = 0; i < featureNames.length; i++) {
-      mean[i] += Number(row[featureNames[i]]);
+      const value = Number(row[featureNames[i]]);
+      if (Number.isFinite(value)) {
+        mean[i] += value;
+      }
     }
   }
-  for (let i = 0; i < mean.length; i++) mean[i] /= n;
+
+  for (let i = 0; i < mean.length; i++) {
+    mean[i] /= n;
+  }
 
   const std = new Array(featureNames.length).fill(0);
+
   for (const row of rows) {
     for (let i = 0; i < featureNames.length; i++) {
-      std[i] += (Number(row[featureNames[i]]) - mean[i]) ** 2;
+      const value = Number(row[featureNames[i]]);
+      const safeValue = Number.isFinite(value) ? value : mean[i];
+      std[i] += (safeValue - mean[i]) ** 2;
     }
   }
+
   for (let i = 0; i < std.length; i++) {
     std[i] = Math.sqrt(std[i] / n);
-    if (std[i] === 0) std[i] = 1;
+
+    if (!Number.isFinite(std[i]) || std[i] === 0) {
+      std[i] = 1;
+    }
   }
+
   return { mean, std };
 }
 
-export function standardizeRow(row: CandidateRow, featureNames: string[], std: Standardizer): number[] {
-  return featureNames.map((f, i) => (Number(row[f]) - std.mean[i]) / std.std[i]);
+export function standardizeRow(
+  row: CandidateRow,
+  featureNames: string[],
+  standardizer: Standardizer
+): number[] {
+  return featureNames.map((feature, i) => {
+    const value = Number(row[feature]);
+    const safeValue = Number.isFinite(value)
+      ? value
+      : standardizer.mean[i] ?? 0;
+
+    const mean = standardizer.mean[i] ?? 0;
+    const std = standardizer.std[i] || 1;
+
+    return (safeValue - mean) / std;
+  });
 }
 
-export function standardizeMatrix(rows: CandidateRow[], featureNames: string[], std: Standardizer): number[][] {
-  return rows.map((row) => standardizeRow(row, featureNames, std));
+export function standardizeMatrix(
+  rows: CandidateRow[],
+  featureNames: string[],
+  standardizer: Standardizer
+): number[][] {
+  return rows.map((row) =>
+    standardizeRow(row, featureNames, standardizer)
+  );
 }
+
+// -----------------------------------------------------------------------------
+// Logistic Regression
+// -----------------------------------------------------------------------------
 
 export interface LogisticRegressionModel {
   weights: number[];
   bias: number;
   featureNames: string[];
   standardizer: Standardizer;
-  standardizedCoefficients: { feature: string; coefficient: number }[];
+  standardizedCoefficients: {
+    feature: string;
+    coefficient: number;
+  }[];
 }
 
 export function sigmoid(z: number): number {
   if (z < -500) return 0;
   if (z > 500) return 1;
+
   return 1 / (1 + Math.exp(-z));
+}
+
+function dot(a: number[], b: number[]): number {
+  let sum = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    sum += a[i] * b[i];
+  }
+
+  return sum;
 }
 
 export function trainLogisticRegression(
@@ -56,8 +120,25 @@ export function trainLogisticRegression(
   labels: number[],
   featureNames: string[],
   standardizer: Standardizer,
-  options: { lr?: number; epochs?: number; l2?: number; classWeight?: number } = {}
+  options: {
+    lr?: number;
+    epochs?: number;
+    l2?: number;
+    classWeight?: number;
+  } = {}
 ): LogisticRegressionModel {
+  if (rows.length !== labels.length) {
+    throw new Error('Rows and labels must have equal lengths.');
+  }
+
+  if (rows.length === 0 || featureNames.length === 0) {
+    throw new Error('Training data and features must not be empty.');
+  }
+
+  if (!labels.every((label) => label === 0 || label === 1)) {
+    throw new Error('Labels must be binary values 0 or 1.');
+  }
+
   const lr = options.lr ?? 0.01;
   const epochs = options.epochs ?? 500;
   const l2 = options.l2 ?? 0.001;
@@ -66,10 +147,14 @@ export function trainLogisticRegression(
   const n = X.length;
   const d = featureNames.length;
 
-  const posCount = labels.filter((l) => l === 1).length;
+  const posCount = labels.filter((label) => label === 1).length;
   const negCount = n - posCount;
-  const posWeight = n / (2 * Math.max(posCount, 1));
-  const negWeight = n / (2 * Math.max(negCount, 1));
+
+  const posWeight =
+    options.classWeight ?? n / (2 * Math.max(posCount, 1));
+
+  const negWeight =
+    options.classWeight ?? n / (2 * Math.max(negCount, 1));
 
   const weights = new Array(d).fill(0);
   let bias = 0;
@@ -77,54 +162,87 @@ export function trainLogisticRegression(
   for (let epoch = 0; epoch < epochs; epoch++) {
     const gradW = new Array(d).fill(0);
     let gradB = 0;
+
     for (let i = 0; i < n; i++) {
-      const z = bias + dot(weights, X[i]);
-      const pred = sigmoid(z);
-      const err = pred - labels[i];
-      const cw = labels[i] === 1 ? posWeight : negWeight;
+      const prediction = sigmoid(bias + dot(weights, X[i]));
+      const error = prediction - labels[i];
+      const classWeight = labels[i] === 1 ? posWeight : negWeight;
+
       for (let j = 0; j < d; j++) {
-        gradW[j] += err * cw * X[i][j];
+        gradW[j] += error * classWeight * X[i][j];
       }
-      gradB += err * cw;
+
+      gradB += error * classWeight;
     }
+
     for (let j = 0; j < d; j++) {
       weights[j] -= lr * (gradW[j] / n + l2 * weights[j]);
     }
+
     bias -= lr * (gradB / n);
   }
 
-  const standardizedCoefficients = featureNames.map((f, i) => ({
-    feature: f,
+  const standardizedCoefficients = featureNames.map((feature, i) => ({
+    feature,
     coefficient: weights[i],
   }));
 
-  return { weights, bias, featureNames, standardizer, standardizedCoefficients };
+  return {
+    weights,
+    bias,
+    featureNames,
+    standardizer,
+    standardizedCoefficients,
+  };
 }
 
-export function predictLogistic(model: LogisticRegressionModel, row: CandidateRow): { pred: number; prob: number } {
-  const x = standardizeRow(row, model.featureNames, model.standardizer);
-  const z = model.bias + dot(model.weights, x);
-  const prob = sigmoid(z);
-  return { pred: prob >= 0.5 ? 1 : 0, prob };
+export function predictLogistic(
+  model: LogisticRegressionModel,
+  row: CandidateRow
+): { pred: number; prob: number } {
+  const x = standardizeRow(
+    row,
+    model.featureNames,
+    model.standardizer
+  );
+
+  const prob = sigmoid(model.bias + dot(model.weights, x));
+
+  return {
+    pred: prob >= 0.5 ? 1 : 0,
+    prob,
+  };
 }
 
-export function predictLogisticBatch(model: LogisticRegressionModel, rows: CandidateRow[]): { preds: number[]; probs: number[] } {
+export function predictLogisticBatch(
+  model: LogisticRegressionModel,
+  rows: CandidateRow[]
+): { preds: number[]; probs: number[] } {
   const preds: number[] = [];
   const probs: number[] = [];
+
   for (const row of rows) {
-    const r = predictLogistic(model, row);
-    preds.push(r.pred);
-    probs.push(r.prob);
+    const result = predictLogistic(model, row);
+    preds.push(result.pred);
+    probs.push(result.prob);
   }
+
   return { preds, probs };
 }
+
+// -----------------------------------------------------------------------------
+// Random Forest
+// -----------------------------------------------------------------------------
 
 export interface DecisionTree {
   feature: number;
   threshold: number;
   left: DecisionTree | null;
   right: DecisionTree | null;
+
+  // Leaf values are positive-class scores between 0 and 1.
   prediction: number;
+
   isLeaf: boolean;
 }
 
@@ -132,27 +250,44 @@ export interface RandomForestModel {
   trees: DecisionTree[];
   featureNames: string[];
   standardizer: Standardizer;
-  featureImportances: { feature: string; importance: number }[];
+  featureImportances: {
+    feature: string;
+    importance: number;
+  }[];
   nTrees: number;
   maxDepth: number;
 }
 
-function dot(a: number[], b: number[]): number {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
+function giniFromWeights(
+  positiveWeight: number,
+  negativeWeight: number
+): number {
+  const total = positiveWeight + negativeWeight;
+
+  if (total <= 0) return 0;
+
+  const p = positiveWeight / total;
+
+  return 2 * p * (1 - p);
 }
 
-function gini(labels: number[], weights: number[]): number {
-  let posW = 0;
-  let totalW = 0;
-  for (let i = 0; i < labels.length; i++) {
-    if (labels[i] === 1) posW += weights[i];
-    totalW += weights[i];
-  }
-  if (totalW === 0) return 0;
-  const p = posW / totalW;
-  return 1 - p * p - (1 - p) * (1 - p);
+function makeLeaf(
+  positiveWeight: number,
+  negativeWeight: number
+): DecisionTree {
+  const totalWeight = positiveWeight + negativeWeight;
+
+  const prediction =
+    totalWeight > 0 ? positiveWeight / totalWeight : 0;
+
+  return {
+    feature: -1,
+    threshold: 0,
+    left: null,
+    right: null,
+    prediction,
+    isLeaf: true,
+  };
 }
 
 function buildTree(
@@ -164,65 +299,108 @@ function buildTree(
   maxDepth: number,
   importances: number[]
 ): DecisionTree {
-  const posCount = labels.filter((l) => l === 1).length;
-  const leafPred = posCount > labels.length - posCount ? 1 : 0;
+  let positiveWeight = 0;
+  let negativeWeight = 0;
 
-  if (depth >= maxDepth || labels.length < 2 || posCount === 0 || posCount === labels.length) {
-    return { feature: -1, threshold: 0, left: null, right: null, prediction: leafPred, isLeaf: true };
+  for (let i = 0; i < labels.length; i++) {
+    if (labels[i] === 1) {
+      positiveWeight += weights[i];
+    } else {
+      negativeWeight += weights[i];
+    }
   }
 
-  let bestGini = Infinity;
+  const leaf = makeLeaf(positiveWeight, negativeWeight);
+
+  if (
+    depth >= maxDepth ||
+    labels.length < 2 ||
+    positiveWeight === 0 ||
+    negativeWeight === 0 ||
+    featureIndices.length === 0
+  ) {
+    return leaf;
+  }
+
+  const parentGini = giniFromWeights(
+    positiveWeight,
+    negativeWeight
+  );
+
+  let bestImpurity = Infinity;
   let bestFeature = -1;
   let bestThreshold = 0;
-  const parentGini = gini(labels, weights);
 
-  for (const fi of featureIndices) {
-    const values = X.map((row) => row[fi]).sort((a, b) => a - b);
-    const uniqueVals = [...new Set(values)];
-    for (let t = 0; t < uniqueVals.length - 1; t++) {
-      const threshold = (uniqueVals[t] + uniqueVals[t + 1]) / 2;
-      const leftLabels: number[] = [];
-      const rightLabels: number[] = [];
-      const leftWeights: number[] = [];
-      const rightWeights: number[] = [];
-      for (let i = 0; i < X.length; i++) {
-        if (X[i][fi] <= threshold) {
-          leftLabels.push(labels[i]);
-          leftWeights.push(weights[i]);
-        } else {
-          rightLabels.push(labels[i]);
-          rightWeights.push(weights[i]);
-        }
+  for (const featureIndex of featureIndices) {
+    const sorted = X.map((row, i) => ({
+      value: row[featureIndex],
+      label: labels[i],
+      weight: weights[i],
+    })).sort((a, b) => a.value - b.value);
+
+    let leftPositive = 0;
+    let leftNegative = 0;
+
+    let rightPositive = positiveWeight;
+    let rightNegative = negativeWeight;
+
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const item = sorted[i];
+
+      if (item.label === 1) {
+        leftPositive += item.weight;
+        rightPositive -= item.weight;
+      } else {
+        leftNegative += item.weight;
+        rightNegative -= item.weight;
       }
-      if (leftLabels.length === 0 || rightLabels.length === 0) continue;
 
-      const leftGini = gini(leftLabels, leftWeights);
-      const rightGini = gini(rightLabels, rightWeights);
-      const leftW = leftWeights.reduce((a, b) => a + b, 0);
-      const rightW = rightWeights.reduce((a, b) => a + b, 0);
-      const totalW = leftW + rightW;
-      const weightedGini = (leftW / totalW) * leftGini + (rightW / totalW) * rightGini;
+      const next = sorted[i + 1];
 
-      if (weightedGini < bestGini) {
-        bestGini = weightedGini;
-        bestFeature = fi;
-        bestThreshold = threshold;
+      if (item.value === next.value) continue;
+
+      const leftWeight = leftPositive + leftNegative;
+      const rightWeight = rightPositive + rightNegative;
+      const totalWeight = leftWeight + rightWeight;
+
+      if (leftWeight <= 0 || rightWeight <= 0 || totalWeight <= 0) {
+        continue;
+      }
+
+      const impurity =
+        (leftWeight / totalWeight) *
+          giniFromWeights(leftPositive, leftNegative) +
+        (rightWeight / totalWeight) *
+          giniFromWeights(rightPositive, rightNegative);
+
+      if (impurity < bestImpurity) {
+        bestImpurity = impurity;
+        bestFeature = featureIndex;
+
+        bestThreshold =
+          item.value + (next.value - item.value) / 2;
       }
     }
   }
 
-  if (bestFeature === -1) {
-    return { feature: -1, threshold: 0, left: null, right: null, prediction: leafPred, isLeaf: true };
+  if (bestFeature === -1 || bestImpurity >= parentGini) {
+    return leaf;
   }
 
-  importances[bestFeature] += parentGini - bestGini;
+  importances[bestFeature] += Math.max(
+    0,
+    parentGini - bestImpurity
+  );
 
   const leftX: number[][] = [];
   const rightX: number[][] = [];
+
   const leftLabels: number[] = [];
   const rightLabels: number[] = [];
+
   const leftWeights: number[] = [];
   const rightWeights: number[] = [];
+
   for (let i = 0; i < X.length; i++) {
     if (X[i][bestFeature] <= bestThreshold) {
       leftX.push(X[i]);
@@ -235,23 +413,49 @@ function buildTree(
     }
   }
 
+  if (leftX.length === 0 || rightX.length === 0) {
+    return leaf;
+  }
+
   return {
     feature: bestFeature,
     threshold: bestThreshold,
-    left: buildTree(leftX, leftLabels, leftWeights, featureIndices, depth + 1, maxDepth, importances),
-    right: buildTree(rightX, rightLabels, rightWeights, featureIndices, depth + 1, maxDepth, importances),
-    prediction: leafPred,
+
+    left: buildTree(
+      leftX,
+      leftLabels,
+      leftWeights,
+      featureIndices,
+      depth + 1,
+      maxDepth,
+      importances
+    ),
+
+    right: buildTree(
+      rightX,
+      rightLabels,
+      rightWeights,
+      featureIndices,
+      depth + 1,
+      maxDepth,
+      importances
+    ),
+
+    prediction: leaf.prediction,
     isLeaf: false,
   };
 }
 
 function predictTree(tree: DecisionTree, x: number[]): number {
-  if (tree.isLeaf) return tree.prediction;
+  if (tree.isLeaf) {
+    return tree.prediction;
+  }
+
   if (x[tree.feature] <= tree.threshold) {
     return predictTree(tree.left!, x);
-  } else {
-    return predictTree(tree.right!, x);
   }
+
+  return predictTree(tree.right!, x);
 }
 
 export function trainRandomForest(
@@ -259,90 +463,187 @@ export function trainRandomForest(
   labels: number[],
   featureNames: string[],
   standardizer: Standardizer,
-  options: { nTrees?: number; maxDepth?: number; seed?: number; sampleRatio?: number } = {}
+  options: {
+    nTrees?: number;
+    maxDepth?: number;
+    seed?: number;
+    sampleRatio?: number;
+  } = {}
 ): RandomForestModel {
+  if (rows.length !== labels.length) {
+    throw new Error('Rows and labels must have equal lengths.');
+  }
+
+  if (rows.length === 0 || featureNames.length === 0) {
+    throw new Error('Training data and features must not be empty.');
+  }
+
+  if (!labels.every((label) => label === 0 || label === 1)) {
+    throw new Error('Labels must be binary values 0 or 1.');
+  }
+
   const nTrees = options.nTrees ?? 30;
   const maxDepth = options.maxDepth ?? 8;
   const seed = options.seed ?? 42;
-  const sampleRatio = options.sampleRatio ?? 1.0;
+  const sampleRatio = options.sampleRatio ?? 1;
+
+  if (nTrees < 1 || maxDepth < 1 || sampleRatio <= 0) {
+    throw new Error(
+      'nTrees and maxDepth must be positive; sampleRatio must be greater than zero.'
+    );
+  }
 
   const X = standardizeMatrix(rows, featureNames, standardizer);
   const n = X.length;
   const d = featureNames.length;
 
-  const posCount = labels.filter((l) => l === 1).length;
+  const posCount = labels.filter((label) => label === 1).length;
   const negCount = n - posCount;
+
+  // Inverse-frequency class weights are calculated from training data only.
   const posWeight = n / (2 * Math.max(posCount, 1));
   const negWeight = n / (2 * Math.max(negCount, 1));
-  const weights = labels.map((l) => (l === 1 ? posWeight : negWeight));
+
+  const weights = labels.map((label) =>
+    label === 1 ? posWeight : negWeight
+  );
 
   const importances = new Array(d).fill(0);
-
   let rngState = seed >>> 0;
-  const rng = () => {
+
+  const rng = (): number => {
     rngState = (rngState + 0x6d2b79f5) | 0;
+
     let t = rngState;
+
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 
   const trees: DecisionTree[] = [];
-  const sqrtD = Math.max(1, Math.floor(Math.sqrt(d)));
+
+  const featureCount = Math.max(1, Math.floor(Math.sqrt(d)));
+  const sampleSize = Math.max(
+    1,
+    Math.floor(n * sampleRatio)
+  );
 
   for (let t = 0; t < nTrees; t++) {
-    const sampleSize = Math.floor(n * sampleRatio);
     const indices: number[] = [];
+
+    // Bootstrap sampling: rows may be selected more than once.
     for (let i = 0; i < sampleSize; i++) {
       indices.push(Math.floor(rng() * n));
     }
+
     const sampleX = indices.map((i) => X[i]);
     const sampleLabels = indices.map((i) => labels[i]);
     const sampleWeights = indices.map((i) => weights[i]);
 
-    const featureIndices: number[] = [];
-    const allFeatureIndices = Array.from({ length: d }, (_, i) => i);
+    const allFeatureIndices = Array.from(
+      { length: d },
+      (_, i) => i
+    );
+
+    // Random feature subset for each tree.
     for (let i = allFeatureIndices.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
-      [allFeatureIndices[i], allFeatureIndices[j]] = [allFeatureIndices[j], allFeatureIndices[i]];
-    }
-    for (let i = 0; i < sqrtD; i++) {
-      featureIndices.push(allFeatureIndices[i]);
+
+      [
+        allFeatureIndices[i],
+        allFeatureIndices[j],
+      ] = [
+        allFeatureIndices[j],
+        allFeatureIndices[i],
+      ];
     }
 
-    trees.push(buildTree(sampleX, sampleLabels, sampleWeights, featureIndices, 0, maxDepth, importances));
+    const featureIndices = allFeatureIndices.slice(
+      0,
+      featureCount
+    );
+
+    trees.push(
+      buildTree(
+        sampleX,
+        sampleLabels,
+        sampleWeights,
+        featureIndices,
+        0,
+        maxDepth,
+        importances
+      )
+    );
   }
 
-  const totalImportance = importances.reduce((a, b) => a + b, 0);
-  const normalizedImportances = totalImportance > 0
-    ? importances.map((v) => v / totalImportance)
-    : importances.map(() => 1 / d);
+  const totalImportance = importances.reduce(
+    (sum, value) => sum + value,
+    0
+  );
 
-  const featureImportances = featureNames.map((f, i) => ({
-    feature: f,
+  const normalizedImportances =
+    totalImportance > 0
+      ? importances.map((value) => value / totalImportance)
+      : importances.map(() => (d > 0 ? 1 / d : 0));
+
+  const featureImportances = featureNames.map((feature, i) => ({
+    feature,
     importance: normalizedImportances[i],
   }));
 
-  return { trees, featureNames, standardizer, featureImportances, nTrees, maxDepth };
+  return {
+    trees,
+    featureNames,
+    standardizer,
+    featureImportances,
+    nTrees,
+    maxDepth,
+  };
 }
 
-export function predictRandomForest(model: RandomForestModel, row: CandidateRow): { pred: number; prob: number } {
-  const x = standardizeRow(row, model.featureNames, model.standardizer);
-  let sum = 0;
-  for (const tree of model.trees) {
-    sum += predictTree(tree, x);
+export function predictRandomForest(
+  model: RandomForestModel,
+  row: CandidateRow
+): { pred: number; prob: number } {
+  const x = standardizeRow(
+    row,
+    model.featureNames,
+    model.standardizer
+  );
+
+  if (model.trees.length === 0) {
+    return { pred: 0, prob: 0 };
   }
-  const prob = sum / model.trees.length;
-  return { pred: prob >= 0.5 ? 1 : 0, prob };
+
+  let probabilitySum = 0;
+
+  for (const tree of model.trees) {
+    probabilitySum += predictTree(tree, x);
+  }
+
+  const prob = probabilitySum / model.trees.length;
+
+  return {
+    pred: prob >= 0.5 ? 1 : 0,
+    prob,
+  };
 }
 
-export function predictRandomForestBatch(model: RandomForestModel, rows: CandidateRow[]): { preds: number[]; probs: number[] } {
+export function predictRandomForestBatch(
+  model: RandomForestModel,
+  rows: CandidateRow[]
+): { preds: number[]; probs: number[] } {
   const preds: number[] = [];
   const probs: number[] = [];
+
   for (const row of rows) {
-    const r = predictRandomForest(model, row);
-    preds.push(r.pred);
-    probs.push(r.prob);
+    const result = predictRandomForest(model, row);
+
+    preds.push(result.pred);
+    probs.push(result.prob);
   }
+
   return { preds, probs };
 }
