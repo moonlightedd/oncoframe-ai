@@ -74,23 +74,61 @@ export function parseCsv(text: string): ParsedCsv {
   return { rows, columns, numericColumns, nonNumericColumns, errors };
 }
 
+
 export function rowsToCandidates(rows: Record<string, string>[]): CandidateRow[] {
-  return rows.map((row) => {
-    const candidate: CandidateRow = {
+  return rows.map((row, index) => {
+    const requiredValues = ['candidate_id', 'group_id', 'label'];
+
+    for (const key of requiredValues) {
+      if (row[key] === undefined || row[key].trim() === '') {
+        throw new Error(
+          `Row ${index + 2}: Missing required value "${key}".`
+        );
+      }
+    }
+
+    const label = Number(row.label);
+
+    if (!Number.isFinite(label) || ![0, 1].includes(label)) {
+      throw new Error(
+        `Row ${index + 2}: label must be 0 or 1.`
+      );
+    }
+
+    const candidate = {
       candidate_id: row.candidate_id,
       group_id: row.group_id,
-      coordX: Number(row.coordX) || 0,
-      coordY: Number(row.coordY) || 0,
-      coordZ: Number(row.coordZ) || 0,
-      label: Number(row.label) || 0,
-    };
+      coordX: 0,
+      coordY: 0,
+      coordZ: 0,
+      label,
+    } as CandidateRow;
+
     for (const key of Object.keys(row)) {
       if (key === 'candidate_id' || key === 'group_id') {
         candidate[key] = row[key];
-      } else {
-        candidate[key] = Number(row[key]) || 0;
+        continue;
       }
+
+      const rawValue = row[key]?.trim();
+
+      if (rawValue === undefined || rawValue === '') {
+        throw new Error(
+          `Row ${index + 2}: Missing numeric value in "${key}".`
+        );
+      }
+
+      const numericValue = Number(rawValue);
+
+      if (!Number.isFinite(numericValue)) {
+        throw new Error(
+          `Row ${index + 2}: "${key}" must contain a finite number.`
+        );
+      }
+
+      candidate[key] = numericValue;
     }
+
     return candidate;
   });
 }
