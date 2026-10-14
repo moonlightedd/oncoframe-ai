@@ -14,28 +14,40 @@ export function useTrainingWorker() {
 
   useEffect(() => {
     return () => {
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
-      }
+      workerRef.current?.terminate();
+      workerRef.current = null;
     };
   }, []);
 
   const train = useCallback(
     (candidates: CandidateRow[], seed: number, onDone: TrainDoneCallback) => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+
       setIsTraining(true);
       setProgress(0);
       setStatus('Starting...');
 
-      if (workerRef.current) {
-        workerRef.current.terminate();
+      let worker: Worker;
+
+      try {
+        worker = new Worker(
+          new URL('../workers/train.worker.ts', import.meta.url),
+          { type: 'module' }
+        );
+      } catch (error) {
+        setIsTraining(false);
+        setStatus(
+          `Error: ${error instanceof Error ? error.message : String(error)}`
+        );
+        return;
       }
 
-      const worker = new Worker(new URL('../workers/train.worker.ts', import.meta.url), { type: 'module' });
       workerRef.current = worker;
 
       worker.onmessage = (e: MessageEvent) => {
         const msg = e.data;
+
         if (msg.type === 'progress') {
           setProgress(msg.progress);
           setStatus(msg.status);
@@ -43,20 +55,49 @@ export function useTrainingWorker() {
           setProgress(100);
           setStatus('Done');
           setIsTraining(false);
-          onDone(msg.data as TrainResponse);
+
           worker.terminate();
-          workerRef.current = null;
+          if (workerRef.current === worker) {
+            workerRef.current = null;
+          }
+
+          onDone(msg.data as TrainResponse);
+        } else if (msg.type === 'error') {
+          setIsTraining(false);
+          setStatus(
+            `Error: ${msg.message || 'Training failed.'}`
+          );
+          worker.terminate();
+
+          if (workerRef.current === worker) {
+            workerRef.current = null;
+          }
         }
       };
 
       worker.onerror = (e) => {
         setIsTraining(false);
-        setStatus(`Error: ${e.message}`);
+        setStatus(`Error: ${e.message || 'Worker failed.'}`);
         worker.terminate();
-        workerRef.current = null;
+
+        if (workerRef.current === worker) {
+          workerRef.current = null;
+        }
       };
 
-      worker.postMessage({ candidates, seed });
+      try {
+        worker.postMessage({ candidates, seed });
+      } catch (error) {
+        setIsTraining(false);
+        setStatus(
+          `Error: ${error instanceof Error ? error.message : String(error)}`
+        );
+        worker.terminate();
+
+        if (workerRef.current === worker) {
+          workerRef.current = null;
+        }
+      }
     },
     []
   );
