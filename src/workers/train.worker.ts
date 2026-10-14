@@ -1,7 +1,10 @@
-
 /// <reference lib="webworker" />
 
-import type { CandidateRow, SplitResult, ModelResult } from '@/lib/types';
+import type {
+  CandidateRow,
+  SplitResult,
+  ModelResult,
+} from '@/lib/types';
 
 import {
   fitStandardizer,
@@ -36,7 +39,10 @@ export interface TrainResponse {
   testRows: CandidateRow[];
   bootstrapCis: Record<
     string,
-    Record<string, { mean: number; lower95: number; upper95: number }>
+    Record<
+      string,
+      { mean: number; lower95: number; upper95: number }
+    >
   >;
   calibrationData: {
     model: string;
@@ -56,6 +62,25 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
       throw new Error('Training seed must be a finite number.');
     }
 
+    for (let i = 0; i < candidates.length; i++) {
+      const row = candidates[i];
+
+      if (row.label !== 0 && row.label !== 1) {
+        throw new Error(
+          `Row ${i + 1}: label must be 0 or 1.`
+        );
+      }
+
+      if (
+        typeof row.group_id !== 'string' ||
+        row.group_id.trim() === ''
+      ) {
+        throw new Error(
+          `Row ${i + 1}: group_id cannot be empty.`
+        );
+      }
+    }
+
     self.postMessage({
       type: 'progress',
       progress: 5,
@@ -64,8 +89,13 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
 
     const split = groupedSplit(candidates, seed, 0.8);
 
-    if (split.trainRows.length === 0 || split.testRows.length === 0) {
-      throw new Error('The train/test split produced an empty dataset.');
+    if (
+      split.trainRows.length === 0 ||
+      split.testRows.length === 0
+    ) {
+      throw new Error(
+        'The train/test split produced an empty dataset.'
+      );
     }
 
     if (split.overlapCount !== 0) {
@@ -84,7 +114,9 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
       !validBinaryLabels(trainLabels) ||
       !validBinaryLabels(testLabels)
     ) {
-      throw new Error('Labels must contain only binary values 0 and 1.');
+      throw new Error(
+        'Labels must contain only binary values 0 and 1.'
+      );
     }
 
     if (
@@ -98,13 +130,19 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
       );
     }
 
+    if (!Array.isArray(split.featureNames) || split.featureNames.length === 0) {
+      throw new Error(
+        'No feature columns were selected for model training.'
+      );
+    }
+
     self.postMessage({
       type: 'progress',
       progress: 15,
       status: 'Fitting standardizer on training data...',
     });
 
-    // Fit preprocessing on training data only.
+    // Fit preprocessing using training data only.
     const standardizer = fitStandardizer(
       split.trainRows,
       split.featureNames
@@ -202,13 +240,13 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
     for (const result of results) {
       bootstrapCis[result.modelName] = {};
 
-      // Store correctness separately without modifying true class labels.
-      const accuracyRows: AccuracyBootstrapRow[] = split.testRows.map(
-        (row, i) => ({
+      const accuracyRows: AccuracyBootstrapRow[] =
+        split.testRows.map((row, i) => ({
           ...row,
-          isCorrect: Number(result.predictions[i] === testLabels[i]),
-        })
-      );
+          isCorrect: Number(
+            result.predictions[i] === testLabels[i]
+          ),
+        }));
 
       bootstrapCis[result.modelName].accuracy = groupBootstrap(
         accuracyRows,
@@ -216,27 +254,28 @@ self.onmessage = (e: MessageEvent<TrainRequest>) => {
           if (rows.length === 0) return 0;
 
           return (
-            rows.reduce((sum, row) => sum + Number(row.isCorrect), 0) /
-            rows.length
+            rows.reduce(
+              (sum, row) => sum + Number(row.isCorrect),
+              0
+            ) / rows.length
           );
         },
         { nBoot: 300, seed }
       );
 
-      // Preserve original labels for ROC-AUC calculation.
-      const rocRows: RocBootstrapRow[] = split.testRows.map(
-        (row, i) => ({
+      const rocRows: RocBootstrapRow[] =
+        split.testRows.map((row, i) => ({
           ...row,
           bootstrapProbability: Number(result.probabilities[i]),
-        })
-      );
+        }));
 
       bootstrapCis[result.modelName].rocAuc = groupBootstrap(
         rocRows,
         (rows) =>
           calculateAuc(
             rows.map((row) => Number(row.label)),
-rows.map((row) => Number(row.bootstrapProbability))          ),
+            rows.map((row) => Number(row.bootstrapProbability))
+          ),
         { nBoot: 300, seed }
       );
     }
@@ -257,12 +296,6 @@ rows.map((row) => Number(row.bootstrapProbability))          ),
         points: calibrationPlot(testLabels, rfPredictions.probs),
       },
     ];
-
-    self.postMessage({
-      type: 'progress',
-      progress: 100,
-      status: 'Done',
-    });
 
     const response: TrainResponse = {
       split,
@@ -303,7 +336,7 @@ function calculateAuc(
     labels.length !== probabilities.length ||
     labels.length === 0
   ) {
-    return 0;
+    return Number.NaN;
   }
 
   const pairs = probabilities
@@ -326,7 +359,7 @@ function calculateAuc(
   ).length;
 
   if (positiveCount === 0 || negativeCount === 0) {
-    return 0;
+    return Number.NaN;
   }
 
   pairs.sort((a, b) => a.probability - b.probability);
@@ -344,7 +377,7 @@ function calculateAuc(
       end++;
     }
 
-    // Ranks are 1-based, and tied scores receive average ranks.
+    // Average ranks for tied probability scores.
     const averageRank = (index + 1 + end) / 2;
 
     let tiedPositiveCount = 0;
@@ -366,5 +399,5 @@ function calculateAuc(
 
   return Number.isFinite(auc)
     ? Math.max(0, Math.min(1, auc))
-    : 0;
+    : Number.NaN;
 }
